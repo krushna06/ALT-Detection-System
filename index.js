@@ -4,7 +4,7 @@ const { Client, Collection, GatewayIntentBits } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v9');
 const { token, clientId, guildId } = require('./config/config.json');
-const startServer = require('./server');
+const startVerify = require('./verify');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -59,5 +59,5 @@ for (const file of eventFiles) {
 client.login(token);
 
 client.once('ready', () => {
-  startServer(client);
+  startVerify(client);
 });
