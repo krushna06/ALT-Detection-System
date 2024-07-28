@@ -25,7 +25,7 @@ module.exports = {
         verificationLinks.set(verificationId, userId);
 
         console.log(`Verification link generated for user ${userId}: ${verificationLink}`);
-        await interaction.reply(`Click the following link to verify: ${verificationLink}`);
+        await interaction.reply({ content: `Click the following link to verify: ${verificationLink}`, ephemeral: true });
       }
     }
   },
