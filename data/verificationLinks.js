@@ -1,3 +1,4 @@
 const verificationLinks = new Map();
+const verificationTimers = new Map();
 
-module.exports = { verificationLinks };
+module.exports = { verificationLinks, verificationTimers };
