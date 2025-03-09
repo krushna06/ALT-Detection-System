@@ -31,7 +31,8 @@ const db = new sqlite3.Database('./database.sqlite', (err) => {
         ipAddress TEXT,
         verified INTEGER DEFAULT 0,
         uniqueId TEXT UNIQUE,
-        used INTEGER DEFAULT 0
+        used INTEGER DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
   }
@@ -58,17 +59,28 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
   if (interaction.commandName === 'verify') {
     const userId = interaction.user.id;
-    const uniqueId = uuidv4();
 
-    db.run('INSERT INTO users (userId, verified, uniqueId) VALUES (?, ?, ?)', [userId, 0, uniqueId], (err) => {
-      if (!err) {
-        const verificationLink = `http://localhost:${PORT}/verify/${uniqueId}`;
-        const embed = new EmbedBuilder()
-          .setTitle('Verification Required')
-          .setDescription(`Click [here](${verificationLink}) to verify your account.`)
-          .setColor('#00FF00');
-        interaction.reply({ embeds: [embed], flags: 64 });
+    db.get('SELECT * FROM users WHERE userId = ? AND verified = 1', [userId], (err, user) => {
+      if (err) return interaction.reply({ content: 'An error occurred. Please try again later.', ephemeral: true });
+
+      if (user) {
+        return interaction.reply({ content: 'You\'re already verified.', ephemeral: true });
       }
+
+      const uniqueId = uuidv4();
+      const createdAt = Math.floor(Date.now() / 1000);
+      const expiresAt = createdAt + 300;
+
+      db.run('INSERT INTO users (userId, verified, uniqueId, createdAt) VALUES (?, ?, ?, datetime("now"))', [userId, 0, uniqueId], (err) => {
+        if (!err) {
+          const verificationLink = `http://localhost:${PORT}/verify/${uniqueId}`;
+          const embed = new EmbedBuilder()
+            .setTitle('Verification Required')
+            .setDescription(`Click [here](${verificationLink}) to verify your account.\n\nThis link expires <t:${expiresAt}:R>.`)
+            .setColor('#00FF00');
+          interaction.reply({ embeds: [embed], flags: 64 });
+        }
+      });
     });
   }
 });
@@ -77,6 +89,18 @@ app.get('/verify/:uniqueId', (req, res) => {
   const uniqueId = req.params.uniqueId;
   db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], (err, user) => {
     if (!user || user.used) return res.status(404).send('Invalid verification link.');
+
+    const createdAt = new Date(user.createdAt);
+    const now = new Date();
+    const timeDifference = (now - createdAt) / (1000 * 60);
+
+    if (timeDifference > 5) {
+      db.run('DELETE FROM users WHERE uniqueId = ?', [uniqueId], (err) => {
+        if (err) console.error('Error deleting expired link:', err);
+      });
+      return res.status(404).send('This verification link has expired. Please run `/verify` again to generate a new link.');
+    }
+
     res.send(`
       <form method="POST" action="/verify/${uniqueId}">
         <label>What is 1 + 1?</label>
@@ -106,6 +130,17 @@ app.post('/verify/:uniqueId', async (req, res) => {
 
   db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], async (err, user) => {
     if (err || !user || user.used) return res.status(404).send('Invalid verification link.');
+
+    const createdAt = new Date(user.createdAt);
+    const now = new Date();
+    const timeDifference = (now - createdAt) / (1000 * 60);
+
+    if (timeDifference > 5) {
+      db.run('DELETE FROM users WHERE uniqueId = ?', [uniqueId], (err) => {
+        if (err) console.error('Error deleting expired link:', err);
+      });
+      return res.status(404).send('This verification link has expired. Please run `/verify` again to generate a new link.');
+    }
 
     try {
       const vpnCheckResponse = await axios.get(`https://vpnapi.io/api/${userIp}?key=${process.env.VPN_API_KEY}`);
