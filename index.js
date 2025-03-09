@@ -4,6 +4,7 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
 const requestIp = require('request-ip');
+const axios = require('axios');
 
 const client = new Client({
   intents: [
@@ -86,7 +87,7 @@ app.get('/verify/:uniqueId', (req, res) => {
   });
 });
 
-app.post('/verify/:uniqueId', (req, res) => {
+app.post('/verify/:uniqueId', async (req, res) => {
   const uniqueId = req.params.uniqueId;
   const answer = req.body.answer.trim();
   const userIp = req.clientIp;
@@ -96,15 +97,36 @@ app.post('/verify/:uniqueId', (req, res) => {
       embeds: [
         new EmbedBuilder()
           .setTitle('Verification Failed')
-          .setDescription(`User <@${uniqueId}> failed the captcha.`)
+          .setDescription(`User <@${user.userId}> failed the captcha.`)
           .setColor('#FF0000')
       ]
     });
     return res.status(400).send('Incorrect answer. Please try again.');
   }
 
-  db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], (err, user) => {
+  db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], async (err, user) => {
     if (err || !user || user.used) return res.status(404).send('Invalid verification link.');
+
+    try {
+      const vpnCheckResponse = await axios.get(`https://vpnapi.io/api/${userIp}?key=${process.env.VPN_API_KEY}`);
+      const { vpn, proxy, tor, relay } = vpnCheckResponse.data.security;
+      const securityDetails = `VPN: ${vpn}\nProxy: ${proxy}\nTOR: ${tor}\nRelay: ${relay}`;
+
+      if (vpn || proxy || tor || relay) {
+        webhookClient.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle('Suspicious IP Detected')
+              .setDescription(`User <@${user.userId}> detected with suspicious IP:\n${securityDetails}`)
+              .setColor('#FFA500')
+          ]
+        });
+        return res.send('Verification failed. VPN/Proxy detected.');
+      }
+    } catch (error) {
+      console.error('Error checking VPN API:', error);
+      return res.status(500).send('Error verifying IP address. Please try again later.');
+    }
 
     db.get('SELECT * FROM users WHERE ipAddress = ?', [userIp], (err, existingUser) => {
       if (err) return res.status(500).send('An error occurred. Please try again later.');
