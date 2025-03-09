@@ -1,63 +1,121 @@
-const fs = require('fs');
-const path = require('path');
-const { Client, Collection, GatewayIntentBits } = require('discord.js');
-const { REST } = require('@discordjs/rest');
-const { Routes } = require('discord-api-types/v9');
-const { token, clientId, guildId } = require('./config/config.json');
-const startVerify = require('./verify');
+require('dotenv').config();
+const { Client, IntentsBitField, EmbedBuilder, REST, Routes } = require('discord.js');
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const { v4: uuidv4 } = require('uuid');
+const requestIp = require('request-ip');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    IntentsBitField.Flags.Guilds,
+    IntentsBitField.Flags.GuildMembers,
+    IntentsBitField.Flags.GuildMessages,
+  ],
+});
 
-client.commands = new Collection();
+const app = express();
+const PORT = 3000;
 
-// Load commands
-const commands = [];
-const commandsPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+app.use(express.urlencoded({ extended: true }));
+app.use(requestIp.mw());
 
-for (const file of commandFiles) {
-  const filePath = path.join(commandsPath, file);
-  const command = require(filePath);
-  client.commands.set(command.data.name, command);
-  commands.push(command.data.toJSON());
-}
+const db = new sqlite3.Database('./database.sqlite', (err) => {
+  if (!err) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userId TEXT UNIQUE,
+        ipAddress TEXT,
+        verified INTEGER DEFAULT 0,
+        uniqueId TEXT UNIQUE,
+        used INTEGER DEFAULT 0
+      )
+    `);
+  }
+});
 
-// Register commands with Discord
-const rest = new REST({ version: '9' }).setToken(token);
+const commands = [{
+  name: 'verify',
+  description: 'Verify your account to gain access to the server.',
+}];
 
+const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 (async () => {
   try {
-    console.log('Started refreshing application (/) commands.');
-
     await rest.put(
-      Routes.applicationGuildCommands(clientId, guildId),
-      { body: commands },
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands }
     );
-
-    console.log('Successfully reloaded application (/) commands.');
-  } catch (error) {
-    console.error(error);
-  }
+  } catch (error) {}
 })();
 
-// Load events
-const eventsPath = path.join(__dirname, 'events');
-const eventFiles = fs.readdirSync(eventsPath).flatMap(dir => {
-  const eventPath = path.join(eventsPath, dir);
-  return fs.readdirSync(eventPath).map(file => path.join(eventPath, file));
-}).filter(file => file.endsWith('.js'));
+client.on('ready', () => console.log(`Logged in as ${client.user.tag}`));
 
-for (const file of eventFiles) {
-  const event = require(file);
-  if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args));
-  } else {
-    client.on(event.name, (...args) => event.execute(...args));
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand()) return;
+  if (interaction.commandName === 'verify') {
+    const userId = interaction.user.id;
+    const uniqueId = uuidv4();
+
+    db.run('INSERT INTO users (userId, verified, uniqueId) VALUES (?, ?, ?)', [userId, 0, uniqueId], (err) => {
+      if (!err) {
+        const verificationLink = `http://localhost:${PORT}/verify/${uniqueId}`;
+        const embed = new EmbedBuilder()
+          .setTitle('Verification Required')
+          .setDescription(`Click [here](${verificationLink}) to verify your account.`)
+          .setColor('#00FF00');
+        interaction.reply({ embeds: [embed], flags: 64 });
+      }
+    });
   }
-}
-
-client.login(token);
-
-client.once('ready', () => {
-  startVerify(client);
 });
+
+app.get('/verify/:uniqueId', (req, res) => {
+  const uniqueId = req.params.uniqueId;
+  db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], (err, user) => {
+    if (!user || user.used) return res.status(404).send('Invalid verification link.');
+    res.send(`
+      <form method="POST" action="/verify/${uniqueId}">
+        <label>What is 1 + 1?</label>
+        <input type="text" name="answer" required />
+        <button type="submit">Submit</button>
+      </form>
+    `);
+  });
+});
+
+app.post('/verify/:uniqueId', (req, res) => {
+  const uniqueId = req.params.uniqueId;
+  const answer = req.body.answer.trim();
+  const userIp = req.clientIp;
+
+  if (answer !== '2') {
+    console.log(`Failed verification attempt for UUID: ${uniqueId}`);
+    return res.status(400).send('Incorrect answer. Please try again.');
+  }
+
+  db.get('SELECT * FROM users WHERE uniqueId = ?', [uniqueId], (err, user) => {
+    if (err || !user || user.used) return res.status(404).send('Invalid verification link.');
+
+    db.get('SELECT * FROM users WHERE ipAddress = ?', [userIp], (err, existingUser) => {
+      if (err) return res.status(500).send('An error occurred. Please try again later.');
+
+      if (existingUser) return res.send(`This IP address is already associated with another account. UserID: ${existingUser.userId}`);
+
+      db.run('UPDATE users SET ipAddress = ?, verified = ?, used = 1 WHERE uniqueId = ?', [userIp, 1, uniqueId], (err) => {
+        if (!err) {
+          const guild = client.guilds.cache.get(process.env.GUILD_ID);
+          const member = guild.members.cache.get(user.userId);
+          const verifiedRole = guild.roles.cache.get('1261340851561299998');
+          if (member && verifiedRole) member.roles.add(verifiedRole).catch(console.error);
+          console.log(`Successful verification for UUID: ${uniqueId}`);
+          res.send('Verification successful! You can now access the server.');
+        }
+      });
+    });
+  });
+});
+
+app.listen(PORT, () => console.log(`Server is running on http://localhost:${PORT}`));
+
+client.login(process.env.DISCORD_TOKEN);
