@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, IntentsBitField, EmbedBuilder, REST, Routes } = require('discord.js');
+const { Client, IntentsBitField, EmbedBuilder, REST, Routes, WebhookClient } = require('discord.js');
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
@@ -12,6 +12,8 @@ const client = new Client({
     IntentsBitField.Flags.GuildMessages,
   ],
 });
+
+const webhookClient = new WebhookClient({ url: process.env.WEBHOOK_URL });
 
 const app = express();
 const PORT = 3000;
@@ -90,7 +92,14 @@ app.post('/verify/:uniqueId', (req, res) => {
   const userIp = req.clientIp;
 
   if (answer !== '2') {
-    console.log(`Failed verification attempt for UUID: ${uniqueId}`);
+    webhookClient.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Verification Failed')
+          .setDescription(`User <@${uniqueId}> failed the captcha.`)
+          .setColor('#FF0000')
+      ]
+    });
     return res.status(400).send('Incorrect answer. Please try again.');
   }
 
@@ -100,7 +109,17 @@ app.post('/verify/:uniqueId', (req, res) => {
     db.get('SELECT * FROM users WHERE ipAddress = ?', [userIp], (err, existingUser) => {
       if (err) return res.status(500).send('An error occurred. Please try again later.');
 
-      if (existingUser) return res.send(`This IP address is already associated with another account. UserID: ${existingUser.userId}`);
+      if (existingUser) {
+        webhookClient.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle('Verification Failed')
+              .setDescription(`User <@${user.userId}> was detected as an alt. Existing account(s): <@${existingUser.userId}>`)
+              .setColor('#FF0000')
+          ]
+        });
+        return res.send(`This IP address is already associated with another account. UserID: ${existingUser.userId}`);
+      }
 
       db.run('UPDATE users SET ipAddress = ?, verified = ?, used = 1 WHERE uniqueId = ?', [userIp, 1, uniqueId], (err) => {
         if (!err) {
@@ -108,7 +127,15 @@ app.post('/verify/:uniqueId', (req, res) => {
           const member = guild.members.cache.get(user.userId);
           const verifiedRole = guild.roles.cache.get('1261340851561299998');
           if (member && verifiedRole) member.roles.add(verifiedRole).catch(console.error);
-          console.log(`Successful verification for UUID: ${uniqueId}`);
+
+          webhookClient.send({
+            embeds: [
+              new EmbedBuilder()
+                .setTitle('Verification Successful')
+                .setDescription(`User <@${user.userId}> has been verified.`)
+                .setColor('#00FF00')
+            ]
+          });
           res.send('Verification successful! You can now access the server.');
         }
       });
